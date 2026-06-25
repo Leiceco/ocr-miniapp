@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../database/database_helper.dart';
 import '../main.dart';
+import '../services/report_service.dart';
+import '../services/notification_service.dart';
 import '../utils/app_state.dart';
 
 class HomePage extends StatefulWidget {
@@ -28,6 +30,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   /// 筛选条件: all / expense / income
   String _filter = 'all';
+
+  /// 周报/月报摘要
+  ReportSummary? _weeklyReport;
+  ReportSummary? _monthlyReport;
 
   @override
   void initState() {
@@ -135,6 +141,26 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _transactions = transactions;
       });
     }
+    // 加载报告（非阻塞）
+    _loadReports();
+  }
+
+  Future<void> _loadReports() async {
+    final weekly = await ReportService.generateWeeklyReport();
+    final monthly = await ReportService.generateMonthlyReport();
+    if (mounted) {
+      setState(() {
+        _weeklyReport = weekly;
+        _monthlyReport = monthly;
+      });
+    }
+  }
+
+  /// 推送报告通知
+  Future<void> _pushReports() async {
+    await ReportService.checkAndPushReports();
+    // 同时记录活跃时间，用于智能调整提醒
+    await NotificationService.recordActiveTime();
   }
 
   /// 删除交易 —— 弹出确认对话框后执行
@@ -289,6 +315,28 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               ),
             ],
 
+            // ===== 周报/月报 =====
+            if (_weeklyReport != null || _monthlyReport != null) ...[
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Text('消费报告', style: Theme.of(context).textTheme.titleMedium),
+                  const Spacer(),
+                  IconButton(
+                    icon: const Icon(Icons.refresh, size: 18),
+                    onPressed: _loadReports,
+                    tooltip: '刷新报告',
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              if (_weeklyReport != null) _reportCard(context, _weeklyReport!),
+              if (_monthlyReport != null) ...[
+                const SizedBox(height: 8),
+                _reportCard(context, _monthlyReport!),
+              ],
+            ],
+
             // ===== 筛选 + 列表 =====
             const SizedBox(height: 16),
             Row(
@@ -432,6 +480,42 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
           ),
           onLongPress: () => _deleteTransaction(t),
+        ),
+      ),
+    );
+  }
+
+  Widget _reportCard(BuildContext context, ReportSummary report) {
+    return Card(
+      color: Colors.blue.shade50,
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.assessment, size: 18, color: Colors.blue.shade700),
+                const SizedBox(width: 6),
+                Text('${report.label}总支出: ¥${report.fmt.format(report.totalAmount)}',
+                    style: const TextStyle(fontWeight: FontWeight.bold)),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(report.trend,
+                style: TextStyle(
+                    fontSize: 13,
+                    color: report.trend.contains('增加')
+                        ? Colors.red
+                        : Colors.green.shade700)),
+            if (report.topCategories.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              ...report.topCategories
+                  .map((c) => Text(c,
+                      style: const TextStyle(fontSize: 12, color: Colors.black87)))
+                  .take(3),
+            ],
+          ],
         ),
       ),
     );

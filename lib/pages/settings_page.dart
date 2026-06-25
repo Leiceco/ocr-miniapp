@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../database/database_helper.dart';
+import '../services/notification_service.dart';
 import '../utils/app_state.dart';
 
 class SettingsPage extends StatefulWidget {
@@ -12,6 +14,8 @@ class _SettingsPageState extends State<SettingsPage> {
   List<Map<String, dynamic>> _books = [];
   List<Map<String, dynamic>> _expenseCats = [];
   List<Map<String, dynamic>> _incomeCats = [];
+  int _reminderHour = 21;
+  int _reminderMinute = 0;
 
   @override
   void initState() {
@@ -36,6 +40,12 @@ class _SettingsPageState extends State<SettingsPage> {
     final ec = await db.query('categories', where: 'type=?', whereArgs: ['expense'], orderBy: 'sort_order');
     final ic = await db.query('categories', where: 'type=?', whereArgs: ['income'], orderBy: 'sort_order');
     if (mounted) setState(() { _books = books; _expenseCats = ec; _incomeCats = ic; });
+
+    // 加载通知时间偏好
+    final prefs = await SharedPreferences.getInstance();
+    final h = prefs.getInt('reminder_hour') ?? 21;
+    final m = prefs.getInt('reminder_minute') ?? 0;
+    if (mounted) setState(() { _reminderHour = h; _reminderMinute = m; });
   }
 
   Future<void> _addBook() async {
@@ -268,6 +278,34 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
+  Future<void> _setReminderTime() async {
+    final time = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay(hour: _reminderHour, minute: _reminderMinute),
+      builder: (ctx, child) => MediaQuery(
+        data: MediaQuery.of(ctx).copyWith(alwaysUse24HourFormat: true),
+        child: child!,
+      ),
+    );
+    if (time != null) {
+      await NotificationService.scheduleDailyReminder(
+        hour: time.hour,
+        minute: time.minute,
+      );
+      setState(() {
+        _reminderHour = time.hour;
+        _reminderMinute = time.minute;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('提醒时间已设为 ${time.hour}:${time.minute.toString().padLeft(2, '0')}'),
+          ),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -317,10 +355,24 @@ class _SettingsPageState extends State<SettingsPage> {
             onTap: () => _addCategory('income'),
           ),
           const Divider(height: 32),
+          // ---- 通知设置 ----
+          Text('🔔 通知设置', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          ListTile(
+            leading: const Icon(Icons.alarm),
+            title: const Text('每日记账提醒'),
+            subtitle: Text(
+              '$_reminderHour:${_reminderMinute.toString().padLeft(2, '0')}',
+              style: const TextStyle(fontSize: 14),
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: _setReminderTime,
+          ),
+          const Divider(height: 32),
           Text('关于', style: Theme.of(context).textTheme.titleMedium),
           const ListTile(
-            title: Text('记账助手 v1.0'),
-            subtitle: Text('纯本地记账，数据存储在您的设备上'),
+            title: Text('记账助手 v1.1'),
+            subtitle: Text('纯本地记账 · 智能解析 · 语音录入 · 完全离线'),
           ),
         ],
       ),

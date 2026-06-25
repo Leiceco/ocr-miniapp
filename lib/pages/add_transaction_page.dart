@@ -1,7 +1,12 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:speech_to_text/speech_to_text.dart' as stt;
 import '../database/database_helper.dart';
+import '../services/anomaly_detector.dart';
+import '../services/bill_parser.dart';
+import '../services/book_recommender.dart';
+import '../services/notification_service.dart';
 import '../services/ocr_service.dart';
 import '../utils/app_state.dart';
 
@@ -16,6 +21,7 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
   final _noteCtrl = TextEditingController();
   final _picker = ImagePicker();
   final _ocr = OCRService();
+  final _speech = stt.SpeechToText();
 
   String _type = 'expense';
   int _bookId = 1;
@@ -23,6 +29,7 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
   DateTime _date = DateTime.now();
   File? _imageFile;
   bool _processing = false;
+  bool _voiceListening = false;  // 语音录入状态
 
   List<Map<String, dynamic>> _expenseCategories = [];
   List<Map<String, dynamic>> _incomeCategories = [];
@@ -42,6 +49,10 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
     final ic = await db.query('categories',
         where: 'type=?', whereArgs: ['income'], orderBy: 'sort_order');
     final books = await db.query('account_books');
+
+    // 推荐最合适的账本
+    final recommendedId = await BookRecommender.recommend();
+
     if (mounted) {
       setState(() {
         _expenseCategories = ec;
@@ -50,8 +61,12 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
         if (_expenseCategories.isNotEmpty) {
           _categoryId = _expenseCategories.first['id'] as int;
         }
-        // 动态获取第一个账本 ID，避免硬编码 1
-        if (_books.isNotEmpty) _bookId = _books.first['id'] as int;
+        // 优先使用推荐账本，其次第一个
+        if (recommendedId != null && books.any((b) => b['id'] == recommendedId)) {
+          _bookId = recommendedId;
+        } else if (_books.isNotEmpty) {
+          _bookId = _books.first['id'] as int;
+        }
       });
     }
   }
@@ -152,18 +167,33 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
         'created_at': DateTime.now().toIso8601String(),
       });
 
+      // 异常检测
+      final anomaly = await AnomalyDetector.check(
+        bookId: _bookId,
+        categoryId: cat['id'] as int,
+        amount: amount,
+        type: _type,
+        date: _date.toIso8601String(),
+      );
+
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('记录成功'), duration: Duration(seconds: 1)));
+        if (anomaly.hasWarning) {
+          // 有异常，弹窗提醒
+          _showAnomalyDialog(anomaly);
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('记录成功'), duration: Duration(seconds: 1)));
+        }
         _amountCtrl.clear();
         _noteCtrl.clear();
-        // 重置分类到当前类型的第一个
         setState(() {
           _imageFile = null;
           if (catList.isNotEmpty) _categoryId = catList.first['id'] as int;
         });
-        // 通知其他页面刷新
         AppState.notify();
+
+        // 记录活跃时间（用于智能通知）
+        NotificationService.recordActiveTime();
       }
     } catch (e) {
       if (mounted) {
@@ -171,6 +201,142 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
             SnackBar(content: Text('保存失败: $e')));
       }
     }
+  }
+
+  /// 智能解析：从文本中提取金额、类型、分类
+  Future<void> _smartParse() async {
+    final text = _noteCtrl.text.trim();
+    if (text.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('请在备注框中输入描述文字')),
+        );
+      }
+      return;
+    }
+
+    // 加载用户自定义关键词（合并内置+自定义）
+    // 注：当前解析器已内置关键词，自定义关键词通过 SharedPreferences 持久化
+    final parsed = BillParser.parse(text);
+
+    if (!parsed.isValid) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('未能识别金额，请手动输入或调整描述')),
+        );
+      }
+      return;
+    }
+
+    // 自动填入金额
+    _amountCtrl.text = parsed.amount!.toStringAsFixed(2);
+
+    // 自动切换类型
+    if (parsed.type != null && parsed.type != _type) {
+      setState(() => _type = parsed.type!);
+    }
+
+    // 自动匹配分类
+    if (parsed.categoryHint != null) {
+      final cats =
+          _type == 'expense' ? _expenseCategories : _incomeCategories;
+      final matched = cats.firstWhere(
+        (c) => c['name'] == parsed.categoryHint,
+        orElse: () => cats.isNotEmpty ? cats.first : {'id': _categoryId},
+      );
+      if (matched['name'] == parsed.categoryHint) {
+        setState(() => _categoryId = matched['id'] as int);
+      }
+    }
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '✅ 已识别: ¥${parsed.amount!.toStringAsFixed(2)}'
+            '${parsed.categoryHint != null ? ' → ${parsed.categoryHint}' : ''}'
+            '${parsed.type == 'income' ? ' (收入)' : ''}',
+          ),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+
+  /// 语音录入：开始/停止
+  Future<void> _toggleVoice() async {
+    if (_voiceListening) {
+      await _speech.stop();
+      setState(() => _voiceListening = false);
+      return;
+    }
+
+    final available = await _speech.initialize(
+      onStatus: (s) {
+        if (s == 'done' || s == 'notListening') {
+          setState(() => _voiceListening = false);
+        }
+      },
+    );
+    if (!available) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('语音识别不可用，请检查麦克风权限')),
+        );
+      }
+      return;
+    }
+
+    setState(() => _voiceListening = true);
+    await _speech.listen(
+      onResult: (result) {
+        final text = result.recognizedWords;
+        _noteCtrl.text = text;
+        _noteCtrl.selection =
+            TextSelection.collapsed(offset: text.length);
+        // 识别完成自动触发智能解析
+        if (result.finalResult) {
+          _smartParse();
+        }
+      },
+      localeId: 'zh_CN',
+    );
+  }
+
+  /// 异常弹窗
+  void _showAnomalyDialog(AnomalyResult anomaly) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(children: [
+          Icon(Icons.warning_amber, color: Colors.orange),
+          SizedBox(width: 8),
+          Text('记账提醒'),
+        ]),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: anomaly.warnings
+                .map((w) => Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Text(w, style: const TextStyle(fontSize: 14)),
+                    ))
+                .toList(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('仍然保存'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('知道了'),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -250,11 +416,61 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
               ),
             ),
             const SizedBox(height: 12),
-            // 备注
-            TextField(
-              controller: _noteCtrl,
-              decoration: const InputDecoration(labelText: '备注', border: OutlineInputBorder()),
-              maxLines: 2,
+            // 备注 + 智能解析 + 语音
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _noteCtrl,
+                    decoration: const InputDecoration(
+                      labelText: '备注',
+                      hintText: '输入描述，如"食堂午饭18元"',
+                      border: OutlineInputBorder(),
+                    ),
+                    maxLines: 2,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                // 智能解析按钮
+                Column(
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.auto_awesome),
+                      tooltip: '智能解析',
+                      color: Colors.deepPurple,
+                      onPressed: _smartParse,
+                      style: IconButton.styleFrom(
+                        backgroundColor: Colors.deepPurple.withValues(alpha: 0.1),
+                      ),
+                    ),
+                    const Text('解析',
+                        style: TextStyle(fontSize: 10, color: Colors.deepPurple)),
+                  ],
+                ),
+                // 语音录入按钮
+                Column(
+                  children: [
+                    IconButton(
+                      icon: Icon(_voiceListening ? Icons.mic : Icons.mic_none),
+                      tooltip: _voiceListening ? '停止录音' : '语音录入',
+                      color: _voiceListening ? Colors.red : Colors.blue,
+                      onPressed: _toggleVoice,
+                      style: IconButton.styleFrom(
+                        backgroundColor: (_voiceListening ? Colors.red : Colors.blue)
+                            .withValues(alpha: 0.1),
+                      ),
+                    ),
+                    Text(
+                      _voiceListening ? '录音中' : '语音',
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: _voiceListening ? Colors.red : Colors.blue,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ),
             const SizedBox(height: 12),
             // 拍照OCR
@@ -307,6 +523,7 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
     _amountCtrl.dispose();
     _noteCtrl.dispose();
     _ocr.dispose();
+    if (_voiceListening) _speech.stop();
     super.dispose();
   }
 }

@@ -7,14 +7,17 @@ import 'pages/add_transaction_page.dart';
 import 'pages/statistics_page.dart';
 import 'pages/budget_page.dart';
 import 'pages/settings_page.dart';
+import 'services/notification_service.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   // Windows/Linux/macOS 桌面端需要用 FFI 初始化 sqflite
   if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
     sqfliteFfiInit();
     databaseFactory = databaseFactoryFfi;
   }
+  // 初始化本地通知
+  await NotificationService.init();
   runApp(const ExpenseApp());
 }
 
