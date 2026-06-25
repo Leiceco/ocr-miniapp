@@ -205,6 +205,8 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
 
   /// 智能解析：从文本中提取金额、类型、分类
   Future<void> _smartParse() async {
+    if (!mounted) return;
+
     final text = _noteCtrl.text.trim();
     if (text.isEmpty) {
       if (mounted) {
@@ -267,13 +269,13 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
   Future<void> _toggleVoice() async {
     if (_voiceListening) {
       await _speech.stop();
-      setState(() => _voiceListening = false);
+      if (mounted) setState(() => _voiceListening = false);
       return;
     }
 
     final available = await _speech.initialize(
       onStatus: (s) {
-        if (s == 'done' || s == 'notListening') {
+        if ((s == 'done' || s == 'notListening') && mounted) {
           setState(() => _voiceListening = false);
         }
       },
@@ -287,15 +289,14 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
       return;
     }
 
-    setState(() => _voiceListening = true);
+    if (mounted) setState(() => _voiceListening = true);
     await _speech.listen(
       onResult: (result) {
         final text = result.recognizedWords;
         _noteCtrl.text = text;
-        _noteCtrl.selection =
-            TextSelection.collapsed(offset: text.length);
+        _noteCtrl.selection = TextSelection.collapsed(offset: text.length);
         // 识别完成自动触发智能解析
-        if (result.finalResult) {
+        if (result.finalResult && mounted) {
           _smartParse();
         }
       },
@@ -523,7 +524,7 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
     _amountCtrl.dispose();
     _noteCtrl.dispose();
     _ocr.dispose();
-    if (_voiceListening) _speech.stop();
+    _speech.cancel();
     super.dispose();
   }
 }
