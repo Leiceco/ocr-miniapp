@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:intl/intl.dart';
+import 'package:file_picker/file_picker.dart';
 import '../database/database_helper.dart';
+import '../services/export_service.dart';
+import '../services/import_service.dart';
 import '../utils/app_state.dart';
 
 class StatisticsPage extends StatefulWidget {
@@ -37,7 +40,7 @@ class _StatisticsPageState extends State<StatisticsPage> {
   }
 
   void _onDataChanged() {
-    _loadStats();
+    _loadMeta();
   }
 
   Future<void> _loadMeta() async {
@@ -158,6 +161,285 @@ class _StatisticsPageState extends State<StatisticsPage> {
     }
   }
 
+  Future<void> _exportExcel() async {
+    final book = _books.firstWhere(
+      (b) => b['id'] == _bookId,
+      orElse: () => {'name': '账单'},
+    );
+    final bookName = book['name'] as String? ?? '账单';
+
+    try {
+      final path = await ExportService.exportToExcel(
+        bookId: _bookId,
+        bookName: bookName,
+      );
+      if (path == null && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('当前账本无数据，无法导出')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('导出失败: $e')),
+        );
+      }
+    }
+  }
+
+  /// 导入弹窗：格式说明 + 模板下载 + 文件选择 + 策略选择
+  Future<void> _importExcel() async {
+    bool skipDuplicates = true; // 默认跳过重复
+
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('导入 Excel 账单'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // 格式说明
+                const Text('📋 Excel 列格式要求',
+                    style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+                _buildFormatTable(),
+                const SizedBox(height: 16),
+
+                // 模板下载
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.download, size: 18),
+                  label: const Text('下载模板'),
+                  onPressed: () => ImportService.downloadTemplate(),
+                ),
+                const SizedBox(height: 16),
+
+                // 去重策略
+                const Text('⚙️ 重复处理',
+                    style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    Expanded(
+                      child: RadioListTile<bool>(
+                        title: const Text('跳过重复', style: TextStyle(fontSize: 13)),
+                        value: true,
+                        groupValue: skipDuplicates,
+                        onChanged: (v) =>
+                            setDialogState(() => skipDuplicates = v!),
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                    ),
+                    Expanded(
+                      child: RadioListTile<bool>(
+                        title: const Text('覆盖更新', style: TextStyle(fontSize: 13)),
+                        value: false,
+                        groupValue: skipDuplicates,
+                        onChanged: (v) =>
+                            setDialogState(() => skipDuplicates = v!),
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '重复判断: 同一账本下「日期+类型+分类+金额」完全相同',
+                  style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('关闭'),
+            ),
+            FilledButton.icon(
+              icon: const Icon(Icons.file_open, size: 18),
+              label: const Text('选择文件'),
+              onPressed: () async {
+                // 关闭弹窗，选择文件后执行导入
+                Navigator.pop(ctx, true);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (result != true) return;
+
+    // 选择文件
+    try {
+      final pickResult = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['xlsx'],
+        withData: false,
+        withReadStream: false,
+      );
+      if (pickResult == null || pickResult.files.isEmpty) return;
+
+      final filePath = pickResult.files.single.path;
+      if (filePath == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('无法获取文件路径')),
+          );
+        }
+        return;
+      }
+
+      // 显示处理中
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Row(children: [
+              SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2)),
+              SizedBox(width: 12),
+              Text('正在导入...'),
+            ]),
+            duration: Duration(seconds: 1),
+          ),
+        );
+      }
+
+      // 执行导入
+      final importResult = await ImportService.importFromFile(
+        filePath: filePath,
+        skipDuplicates: skipDuplicates,
+      );
+
+      // 刷新数据
+      AppState.notify();
+
+      // 展示结果
+      if (mounted) {
+        _showImportResult(importResult);
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('导入失败: $e')),
+        );
+      }
+    }
+  }
+
+  /// 显示导入结果统计
+  void _showImportResult(ImportResult result) {
+    final hasErrors = result.errors.isNotEmpty;
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Row(
+          children: [
+            Icon(
+              hasErrors ? Icons.warning_amber : Icons.check_circle,
+              color: hasErrors ? Colors.orange : Colors.green,
+            ),
+            const SizedBox(width: 8),
+            const Text('导入完成'),
+          ],
+        ),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(result.summary(), style: const TextStyle(fontSize: 15)),
+              if (result.success > 0) ...[
+                const SizedBox(height: 4),
+                Text('✅ 成功: ${result.success} 条',
+                    style: const TextStyle(color: Colors.green)),
+              ],
+              if (result.skipped > 0) ...[
+                const SizedBox(height: 4),
+                Text('⏭️  跳过: ${result.skipped} 条（重复）',
+                    style: const TextStyle(color: Colors.orange)),
+              ],
+              if (result.newBooks > 0) ...[
+                const SizedBox(height: 4),
+                Text('📚 新建账本: ${result.newBooks} 个',
+                    style: const TextStyle(color: Colors.blue)),
+              ],
+              if (hasErrors) ...[
+                const Divider(height: 24),
+                Text('⚠️ 以下行有错误:',
+                    style: TextStyle(
+                        fontWeight: FontWeight.bold, color: Colors.red.shade700)),
+                const SizedBox(height: 4),
+                ...result.errors.take(8).map((e) => Padding(
+                      padding: const EdgeInsets.only(bottom: 2),
+                      child: Text(e,
+                          style: const TextStyle(fontSize: 12, color: Colors.red)),
+                    )),
+                if (result.errors.length > 8)
+                  Text('... 还有 ${result.errors.length - 8} 条错误',
+                      style:
+                          const TextStyle(fontSize: 12, color: Colors.red)),
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 构建格式说明表格
+  Widget _buildFormatTable() {
+    final rows = [
+      ['账本名称', '必填', '如"日常账本"，不存在则自动创建'],
+      ['日期', '必填', 'yyyy-MM-dd，如 2026-06-20'],
+      ['类型', '必填', '支出 或 收入'],
+      ['分类', '必填', '如"餐饮"，不存在则自动创建'],
+      ['金额', '必填', '数字，如 35.50'],
+      ['备注', '选填', '任意文字说明'],
+    ];
+
+    return Table(
+      border: TableBorder.all(color: Colors.grey.shade300),
+      columnWidths: const {
+        0: FixedColumnWidth(70),
+        1: FixedColumnWidth(46),
+        2: FlexColumnWidth(),
+      },
+      defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+      children: [
+        // 表头
+        TableRow(
+          decoration: BoxDecoration(color: Colors.blue.shade50),
+          children: const [
+            _TblCell('列名', bold: true),
+            _TblCell('必填', bold: true),
+            _TblCell('说明', bold: true),
+          ],
+        ),
+        // 数据
+        ...rows.map((r) => TableRow(
+              children: [
+                _TblCell(r[0]),
+                _TblCell(r[1], color: r[1] == '必填' ? Colors.red : Colors.grey),
+                _TblCell(r[2]),
+              ],
+            )),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final fmt = NumberFormat('#,##0.00');
@@ -166,6 +448,16 @@ class _StatisticsPageState extends State<StatisticsPage> {
       appBar: AppBar(
         title: const Text('统计分析'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.file_upload),
+            tooltip: '导入 Excel',
+            onPressed: _importExcel,
+          ),
+          IconButton(
+            icon: const Icon(Icons.file_download),
+            tooltip: '导出 Excel',
+            onPressed: _exportExcel,
+          ),
           SegmentedButton<String>(
             segments: const [
               ButtonSegment(value: 'month', label: Text('月')),
@@ -336,6 +628,29 @@ class _StatisticsPageState extends State<StatisticsPage> {
             ),
           ],
         ]),
+      ),
+    );
+  }
+}
+
+/// 表格单元格（用于格式说明）
+class _TblCell extends StatelessWidget {
+  final String text;
+  final bool bold;
+  final Color? color;
+  const _TblCell(this.text, {this.bold = false, this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+      child: Text(
+        text,
+        style: TextStyle(
+          fontSize: 12,
+          fontWeight: bold ? FontWeight.bold : FontWeight.normal,
+          color: color,
+        ),
       ),
     );
   }

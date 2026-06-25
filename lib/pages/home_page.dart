@@ -16,10 +16,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   double _monthBudget = 0;
   String _currentBook = '日常账本';
   int _currentBookId = 1;
+
   /// key = category_id, value = (name, icon, total)
   Map<int, _CatTotal> _categoryTotals = {};
-  List<Map<String, dynamic>> _recentTransactions = [];
+
+  /// 完整交易列表（已按日期倒序）
+  List<Map<String, dynamic>> _transactions = [];
+
+  /// 账本列表
   List<Map<String, dynamic>> _books = [];
+
+  /// 筛选条件: all / expense / income
+  String _filter = 'all';
 
   @override
   void initState() {
@@ -49,25 +57,34 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final db = await DatabaseHelper.database;
     final now = DateTime.now();
     final monthStart = DateTime(now.year, now.month, 1).toIso8601String();
-    // 用下月首日作为上界，避免包含未来记录
-    final nextMonth = DateTime(now.year, now.month + 1, 1).toIso8601String();
+    final nextMonth =
+        DateTime(now.year, now.month + 1, 1).toIso8601String();
 
+    // --- 账本列表 & 当前选中账本 ---
     final books = await db.query('account_books');
-    final expenses = await db.rawQuery(
+    final curBook = books.firstWhere(
+      (b) => b['id'] == _currentBookId,
+      orElse: () => books.isNotEmpty ? books.first : {'name': '日常账本', 'id': 1},
+    );
+
+    // --- 月度汇总 ---
+    final expenseSum = await db.rawQuery(
       '''SELECT COALESCE(SUM(amount),0) as total FROM transactions
          WHERE type='expense' AND date >= ? AND date < ? AND book_id=?''',
       [monthStart, nextMonth, _currentBookId],
     );
-    final incomes = await db.rawQuery(
+    final incomeSum = await db.rawQuery(
       '''SELECT COALESCE(SUM(amount),0) as total FROM transactions
          WHERE type='income' AND date >= ? AND date < ? AND book_id=?''',
       [monthStart, nextMonth, _currentBookId],
     );
-    final budgets = await db.rawQuery(
+    final budgetSum = await db.rawQuery(
       '''SELECT COALESCE(SUM(amount),0) as total FROM budgets
          WHERE book_id=? AND period='monthly' AND (category_id IS NULL)''',
       [_currentBookId],
     );
+
+    // --- 分类统计（本月支出） ---
     final catTotals = await db.rawQuery(
       '''SELECT c.id as cat_id, c.name, c.icon, SUM(t.amount) as total
          FROM transactions t JOIN categories c ON t.category_id=c.id
@@ -75,28 +92,37 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
          GROUP BY t.category_id ORDER BY total DESC''',
       [monthStart, nextMonth, _currentBookId],
     );
-    final recent = await db.rawQuery(
-      '''SELECT t.*, c.name as cat_name, c.icon as cat_icon
-         FROM transactions t JOIN categories c ON t.category_id=c.id
-         WHERE t.book_id=?
-         ORDER BY t.date DESC, t.id DESC LIMIT 10''',
-      [_currentBookId],
-    );
+
+    // --- 交易列表（全部 / 按筛选条件） ---
+    List<Map<String, dynamic>> transactions;
+    if (_filter == 'all') {
+      transactions = await db.rawQuery(
+        '''SELECT t.*, c.name as cat_name, c.icon as cat_icon
+           FROM transactions t JOIN categories c ON t.category_id=c.id
+           WHERE t.book_id=?
+           ORDER BY t.date DESC, t.id DESC''',
+        [_currentBookId],
+      );
+    } else {
+      transactions = await db.rawQuery(
+        '''SELECT t.*, c.name as cat_name, c.icon as cat_icon
+           FROM transactions t JOIN categories c ON t.category_id=c.id
+           WHERE t.book_id=? AND t.type=?
+           ORDER BY t.date DESC, t.id DESC''',
+        [_currentBookId, _filter],
+      );
+    }
 
     if (mounted) {
       setState(() {
         _books = books;
-        // 动态取当前选中账本信息，避免硬编码假设
-        final cur = books.firstWhere(
-          (b) => b['id'] == _currentBookId,
-          orElse: () => books.isNotEmpty ? books.first : {'name': '日常账本', 'id': 1},
-        );
-        _currentBook = cur['name'] as String;
-        _currentBookId = cur['id'] as int;
+        _currentBook = curBook['name'] as String;
+        _currentBookId = curBook['id'] as int;
 
-        _monthExpense = (expenses.first['total'] as num).toDouble();
-        _monthIncome = (incomes.first['total'] as num).toDouble();
-        _monthBudget = (budgets.first['total'] as num).toDouble();
+        _monthExpense = (expenseSum.first['total'] as num).toDouble();
+        _monthIncome = (incomeSum.first['total'] as num).toDouble();
+        _monthBudget = (budgetSum.first['total'] as num).toDouble();
+
         _categoryTotals = {
           for (var r in catTotals)
             r['cat_id'] as int: _CatTotal(
@@ -105,8 +131,58 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               total: (r['total'] as num).toDouble(),
             )
         };
-        _recentTransactions = recent;
+
+        _transactions = transactions;
       });
+    }
+  }
+
+  /// 删除交易 —— 弹出确认对话框后执行
+  Future<void> _deleteTransaction(Map<String, dynamic> t) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除记录'),
+        content: Text(
+          '确定删除这笔${t['type'] == 'expense' ? '支出' : '收入'}记录吗？\n'
+          '金额：¥${NumberFormat('#,##0.00').format(t['amount'])}\n'
+          '分类：${t['cat_name']}',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      try {
+        final db = await DatabaseHelper.database;
+        await db.delete(
+          'transactions',
+          where: 'id=?',
+          whereArgs: [t['id']],
+        );
+        AppState.notify();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('已删除')),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('删除失败: $e')),
+          );
+        }
+      }
     }
   }
 
@@ -121,9 +197,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       appBar: AppBar(
         title: DropdownButtonHideUnderline(
           child: DropdownButton<String>(
-            value: _books.any((b) => b['name'] == _currentBook)
-                ? _currentBook
-                : null,
+            value:
+                _books.any((b) => b['name'] == _currentBook) ? _currentBook : null,
             items: _books
                 .map((b) => DropdownMenuItem(
                     value: b['name'] as String,
@@ -144,7 +219,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           IconButton(
             icon: const Icon(Icons.camera_alt),
             onPressed: () {
-              // 通过 MainShellState 切换到记账页（索引 1）
               context.findAncestorStateOfType<MainShellState>()?.switchToTab(1);
             },
           ),
@@ -155,7 +229,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         child: ListView(
           padding: const EdgeInsets.all(16),
           children: [
-            // 月度概览卡片
+            // ===== 月度概览卡片 =====
             Card(
               child: Padding(
                 padding: const EdgeInsets.all(20),
@@ -183,7 +257,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       children: [
                         _summaryChip(context, '收入', _monthIncome, Colors.green),
                         const SizedBox(width: 32),
-                        _summaryChip(context, '结余', _monthIncome - _monthExpense,
+                        _summaryChip(context, '结余',
+                            _monthIncome - _monthExpense,
                             (_monthIncome - _monthExpense) >= 0
                                 ? Colors.blue
                                 : Colors.red),
@@ -193,9 +268,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 ),
               ),
             ),
-            const SizedBox(height: 16),
-            // 分类统计
+
+            // ===== 分类统计（本月支出） =====
             if (_categoryTotals.isNotEmpty) ...[
+              const SizedBox(height: 16),
               Text('支出分类', style: Theme.of(context).textTheme.titleMedium),
               const SizedBox(height: 8),
               SizedBox(
@@ -205,29 +281,58 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   children: _categoryTotals.entries.map((e) {
                     return Padding(
                       padding: const EdgeInsets.only(right: 12),
-                      child: _categoryCard(context, e.value.name, e.value.icon,
-                          e.value.total, _monthExpense),
+                      child: _categoryCard(context, e.value.name,
+                          e.value.icon, e.value.total, _monthExpense),
                     );
                   }).toList(),
                 ),
               ),
-              const SizedBox(height: 16),
             ],
-            // 最近记录
-            Text('最近记录', style: Theme.of(context).textTheme.titleMedium),
+
+            // ===== 筛选 + 列表 =====
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Text('账单明细', style: Theme.of(context).textTheme.titleMedium),
+                const Spacer(),
+                Text('${_transactions.length} 笔',
+                    style: Theme.of(context).textTheme.bodySmall),
+              ],
+            ),
             const SizedBox(height: 8),
-            if (_recentTransactions.isEmpty)
+
+            // 筛选芯片
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  _filterChip('全部', 'all'),
+                  const SizedBox(width: 8),
+                  _filterChip('支出', 'expense'),
+                  const SizedBox(width: 8),
+                  _filterChip('收入', 'income'),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+
+            // 交易列表
+            if (_transactions.isEmpty)
               const Center(
-                  child: Padding(
-                      padding: EdgeInsets.all(32),
-                      child: Text('暂无记录，点击"记账"开始')))
+                child: Padding(
+                  padding: EdgeInsets.all(32),
+                  child: Text('暂无记录，点击底部"记账"开始'),
+                ),
+              )
             else
-              ..._recentTransactions.map((t) => _transactionTile(t, fmt)),
+              ..._transactions.map((t) => _transactionItem(t, fmt)),
           ],
         ),
       ),
     );
   }
+
+  // -------- 小组件 --------
 
   Widget _summaryChip(
       BuildContext context, String label, double amount, Color color) {
@@ -248,7 +353,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         padding: const EdgeInsets.all(12),
         child: Column(
           children: [
-            Icon(_catIcon(icon), color: Theme.of(context).colorScheme.primary),
+            Icon(_catIcon(icon),
+                color: Theme.of(context).colorScheme.primary),
             Text(name, style: Theme.of(context).textTheme.bodySmall),
             Text('${(pct * 100).toStringAsFixed(0)}%',
                 style: const TextStyle(fontWeight: FontWeight.bold)),
@@ -258,22 +364,75 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
-  Widget _transactionTile(Map<String, dynamic> t, NumberFormat fmt) {
+  Widget _filterChip(String label, String value) {
+    final selected = _filter == value;
+    return FilterChip(
+      label: Text(label),
+      selected: selected,
+      onSelected: (_) {
+        setState(() => _filter = value);
+        _loadData();
+      },
+      showCheckmark: false,
+    );
+  }
+
+  /// 单条交易记录 —— 支持滑动删除
+  Widget _transactionItem(Map<String, dynamic> t, NumberFormat fmt) {
     final isExpense = t['type'] == 'expense';
     final dateStr = t['date'] as String;
     final date = DateTime.tryParse(dateStr) ?? DateTime.now();
-    return ListTile(
-      leading: CircleAvatar(
-        child: Icon(_catIcon(t['cat_icon'] as String?), size: 20),
+
+    return Dismissible(
+      key: Key('txn-${t['id']}'),
+      direction: DismissDirection.endToStart,
+      confirmDismiss: (_) async {
+        await _deleteTransaction(t);
+        return false; // 由 _deleteTransaction 内部处理删除与刷新
+      },
+      background: Container(
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.only(right: 20),
+        color: Colors.red,
+        child: const Icon(Icons.delete, color: Colors.white),
       ),
-      title: Text(t['cat_name'] as String? ?? ''),
-      subtitle: Text(DateFormat('MM-dd HH:mm').format(date)),
-      trailing: Text(
-        '${isExpense ? '-' : '+'}¥${fmt.format(t['amount'])}',
-        style: TextStyle(
-            fontWeight: FontWeight.bold,
-            color: isExpense ? Colors.red : Colors.green,
-            fontSize: 16),
+      child: Card(
+        margin: const EdgeInsets.only(bottom: 4),
+        child: ListTile(
+          leading: CircleAvatar(
+            radius: 18,
+            child: Icon(_catIcon(t['cat_icon'] as String?), size: 18),
+          ),
+          title: Text(
+            t['cat_name'] as String? ?? '',
+            style: const TextStyle(fontWeight: FontWeight.w500),
+          ),
+          subtitle: Row(
+            children: [
+              Text(DateFormat('MM-dd HH:mm').format(date),
+                  style: const TextStyle(fontSize: 12)),
+              if ((t['note'] as String?)?.isNotEmpty == true) ...[
+                const SizedBox(width: 8),
+                Flexible(
+                  child: Text(
+                    t['note'] as String,
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ],
+          ),
+          trailing: Text(
+            '${isExpense ? '-' : '+'}¥${fmt.format(t['amount'])}',
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+              color: isExpense ? Colors.red : Colors.green,
+              fontSize: 16,
+            ),
+          ),
+          onLongPress: () => _deleteTransaction(t),
+        ),
       ),
     );
   }
@@ -303,5 +462,6 @@ class _CatTotal {
   final String name;
   final String icon;
   final double total;
-  const _CatTotal({required this.name, required this.icon, required this.total});
+  const _CatTotal(
+      {required this.name, required this.icon, required this.total});
 }
