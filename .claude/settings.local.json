@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(flutter analyze *)",
+      "Bash(flutter devices *)",
+      "Bash(flutter run *)",
+      "Bash(flutter pub *)",
+      "Bash(flutter clean *)",
+      "Bash(tasklist /FI \"IMAGENAME eq ocr_app.exe\")",
+      "Bash(tasklist)",
+      "Bash(powershell *)",
+      "Bash(flutter build *)",
+      "Read(//c/Users/Leiceco/AppData/**)",
+      "Read(//c/Users/Leiceco/**)"
+    ]
+  }
+}
