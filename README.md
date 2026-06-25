@@ -105,7 +105,10 @@ flutter run
 flutter build apk --debug
 
 # 构建 Android APK（release）
-flutter build apk --release
+# 国内用户推荐使用 build_apk.sh 脚本（已设置 SQLITE3_NO_DOWNLOAD=1）
+./build_apk.sh --release
+# 或手动设置环境变量
+SQLITE3_NO_DOWNLOAD=1 flutter build apk --release
 ```
 
 ## 使用说明
