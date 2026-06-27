@@ -30,6 +30,8 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
   File? _imageFile;
   bool _processing = false;
   bool _voiceListening = false;  // 语音录入状态
+  bool _speechInitialized = false;  // 语音初始化状态
+  bool _disposed = false;  // 防止 dispose 后异步回调触发 setState
 
   List<Map<String, dynamic>> _expenseCategories = [];
   List<Map<String, dynamic>> _incomeCategories = [];
@@ -40,6 +42,21 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
     super.initState();
     AppState.addListener(_loadMeta);
     _loadMeta();
+    _initSpeech();
+  }
+
+  Future<void> _initSpeech() async {
+    try {
+      _speechInitialized = await _speech.initialize(
+        onStatus: (s) {
+          if ((s == 'done' || s == 'notListening') && mounted && !_disposed) {
+            setState(() => _voiceListening = false);
+          }
+        },
+      );
+    } catch (_) {
+      _speechInitialized = false;
+    }
   }
 
   Future<void> _loadMeta() async {
@@ -74,7 +91,7 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
   Future<void> _pickCamera() async {
     try {
       final img = await _picker.pickImage(source: ImageSource.camera, maxWidth: 1920);
-      if (img != null) {
+      if (img != null && mounted) {
         setState(() => _imageFile = File(img.path));
         _ocrBill();
       }
@@ -90,7 +107,7 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
   Future<void> _pickGallery() async {
     try {
       final img = await _picker.pickImage(source: ImageSource.gallery, maxWidth: 1920);
-      if (img != null) {
+      if (img != null && mounted) {
         setState(() => _imageFile = File(img.path));
         _ocrBill();
       }
@@ -108,6 +125,7 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
     setState(() => _processing = true);
     try {
       final result = await _ocr.extractBillInfo(_imageFile!);
+      if (!mounted) return;
       if (result.amount != null) {
         _amountCtrl.text = result.amount!.toStringAsFixed(2);
       }
@@ -268,40 +286,48 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
   /// 语音录入：开始/停止
   Future<void> _toggleVoice() async {
     if (_voiceListening) {
-      await _speech.stop();
+      try {
+        await _speech.stop();
+      } catch (_) {
+        // 忽略 stop 异常
+      }
       if (mounted) setState(() => _voiceListening = false);
       return;
     }
 
-    final available = await _speech.initialize(
-      onStatus: (s) {
-        if ((s == 'done' || s == 'notListening') && mounted) {
-          setState(() => _voiceListening = false);
-        }
-      },
-    );
-    if (!available) {
+    // 如果尚未初始化，尝试初始化
+    if (!_speechInitialized) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('语音识别不可用，请检查麦克风权限')),
+          const SnackBar(content: Text('语音识别初始化中，请稍后再试')),
         );
       }
       return;
     }
 
     if (mounted) setState(() => _voiceListening = true);
-    await _speech.listen(
-      onResult: (result) {
-        final text = result.recognizedWords;
-        _noteCtrl.text = text;
-        _noteCtrl.selection = TextSelection.collapsed(offset: text.length);
-        // 识别完成自动触发智能解析
-        if (result.finalResult && mounted) {
-          _smartParse();
-        }
-      },
-      localeId: 'zh_CN',
-    );
+    try {
+      await _speech.listen(
+        onResult: (result) {
+          if (!mounted || _disposed) return;
+          final text = result.recognizedWords;
+          _noteCtrl.text = text;
+          _noteCtrl.selection = TextSelection.collapsed(offset: text.length);
+          // 识别完成自动触发智能解析
+          if (result.finalResult) {
+            _smartParse();
+          }
+        },
+        listenOptions: stt.SpeechListenOptions(localeId: 'zh_CN'),
+      );
+    } catch (e) {
+      if (mounted) {
+        setState(() => _voiceListening = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('语音启动失败: $e')),
+        );
+      }
+    }
   }
 
   /// 异常弹窗
@@ -520,11 +546,17 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
 
   @override
   void dispose() {
+    _disposed = true;  // 第一时间标记，防止异步回调在 dispose 过程中触发 setState
     AppState.removeListener(_loadMeta);
+    // 先停止语音，避免回调访问已 dispose 的 controller
+    try {
+      _speech.cancel();
+    } catch (_) {
+      // 忽略 cancel 异常
+    }
     _amountCtrl.dispose();
     _noteCtrl.dispose();
     _ocr.dispose();
-    _speech.cancel();
     super.dispose();
   }
 }

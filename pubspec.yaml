@@ -49,6 +49,14 @@ dependencies:
   flutter_local_notifications: ^18.0.1
   shared_preferences: ^2.3.4
 
+# 禁止 sqlite3 构建钩子从 GitHub 下载预编译库
+# sqlite3_flutter_libs 已提供各平台原生 SQLite 动态库
+hooks:
+  user_defines:
+    sqlite3:
+      source: system
+      name: sqlite3
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

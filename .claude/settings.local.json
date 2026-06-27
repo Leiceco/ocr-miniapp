@@ -11,7 +11,21 @@
       "Bash(powershell *)",
       "Bash(flutter build *)",
       "Read(//c/Users/Leiceco/AppData/**)",
-      "Read(//c/Users/Leiceco/**)"
+      "Read(//c/Users/Leiceco/**)",
+      "Bash(git show *)",
+      "Bash(dart analyze *)",
+      "Bash(dart pub *)",
+      "Bash(flutter test *)",
+      "WebFetch(domain:pub.dev)",
+      "Bash(cmd *)",
+      "Bash(./gradlew --stop)",
+      "Bash(adb devices *)",
+      "Bash(adb kill-server *)",
+      "Bash(\"E:/android-studio/Sdk/platform-tools/adb.exe\" kill-server *)",
+      "Bash(powershell.exe *)",
+      "Bash(taskkill //F //IM ocr_app.exe)",
+      "Bash(git add *)",
+      "Bash(git commit -m 'fix: 修复语音回调竞态导致的 _dependents.isEmpty 断言崩溃 *)"
     ]
   }
 }
