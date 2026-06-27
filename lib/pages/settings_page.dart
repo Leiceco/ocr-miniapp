@@ -16,6 +16,7 @@ class _SettingsPageState extends State<SettingsPage> {
   List<Map<String, dynamic>> _incomeCats = [];
   int _reminderHour = 21;
   int _reminderMinute = 0;
+  bool _disposed = false;
 
   @override
   void initState() {
@@ -26,11 +27,13 @@ class _SettingsPageState extends State<SettingsPage> {
 
   @override
   void dispose() {
+    _disposed = true;
     AppState.removeListener(_onDataChanged);
     super.dispose();
   }
 
   void _onDataChanged() {
+    if (_disposed) return;
     _load();
   }
 

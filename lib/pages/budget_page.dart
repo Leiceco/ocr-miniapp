@@ -19,6 +19,8 @@ class _BudgetPageState extends State<BudgetPage> {
   /// 总预算的已花金额 = values 之和.
   Map<int, double> _spentMap = {};
 
+  bool _disposed = false;
+
   @override
   void initState() {
     super.initState();
@@ -28,12 +30,14 @@ class _BudgetPageState extends State<BudgetPage> {
 
   @override
   void dispose() {
+    _disposed = true;
     AppState.removeListener(_onDataChanged);
     _amountCtrl.dispose();
     super.dispose();
   }
 
   void _onDataChanged() {
+    if (_disposed) return;
     _load();
   }
 

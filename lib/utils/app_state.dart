@@ -5,14 +5,19 @@ import 'package:flutter/material.dart';
 /// 用法：
 ///   AppState.notify();            // 发送通知
 ///   AppState.addListener(fn);     // 订阅（记得在 dispose 中 removeListener）
+///
+/// 注意：notify() 使用 addPostFrameCallback 延迟到当前帧结束后触发，
+/// 避免 InheritedWidget 停用过程中触发 setState 导致 _dependents.isEmpty 断言失败。
 class AppState {
   AppState._();
 
   static final _notifier = ValueNotifier<int>(0);
 
-  /// 发送一次全局刷新通知。
+  /// 发送一次全局刷新通知（延迟到当前帧结束后）。
   static void notify() {
-    _notifier.value++;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _notifier.value++;
+    });
   }
 
   /// 订阅刷新通知。

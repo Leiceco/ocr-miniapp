@@ -35,6 +35,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   ReportSummary? _weeklyReport;
   ReportSummary? _monthlyReport;
 
+  bool _disposed = false;
+
   @override
   void initState() {
     super.initState();
@@ -45,6 +47,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _disposed = true;
     WidgetsBinding.instance.removeObserver(this);
     AppState.removeListener(_onDataChanged);
     super.dispose();
@@ -56,6 +59,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   void _onDataChanged() {
+    if (_disposed) return;
     _loadData();
   }
 

@@ -26,6 +26,8 @@ class _StatisticsPageState extends State<StatisticsPage> {
   Map<String, double> _categoryData = {};
   List<Map<String, dynamic>> _books = [];
 
+  bool _disposed = false;
+
   @override
   void initState() {
     super.initState();
@@ -35,11 +37,13 @@ class _StatisticsPageState extends State<StatisticsPage> {
 
   @override
   void dispose() {
+    _disposed = true;
     AppState.removeListener(_onDataChanged);
     super.dispose();
   }
 
   void _onDataChanged() {
+    if (_disposed) return;
     _loadMeta();
   }
 
