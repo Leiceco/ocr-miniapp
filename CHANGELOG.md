@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.0.2] - 2026-06-27
+
+### 🐛 全局修复：`_dependents.isEmpty` 断言崩溃
+
+**问题：** `AppState.notify()` 同步触发所有监听页面的 `_onDataChanged`，当 `notify()` 在对话框弹出/关闭、页面切换等过渡动画中调用时，各页面的 `setState` 可能在 InheritedWidget 停用过程中执行，导致 `framework.dart:6268` 断言失败
+
+**双层修复：**
+1. **`AppState.notify()`** 改用 `addPostFrameCallback` 延迟到帧结束后触发，消除"停用中重建"窗口期
+2. **全部 5 个页面** 添加 `_disposed` 防御标志位：`settings_page`、`home_page`、`budget_page`、`statistics_page`、`add_transaction_page`
+
+**触发场景：** 创建/删除账本、添加分类、保存记录等操作后弹 SnackBar 期间最容易触发
+
+---
+
 ## [2.0.1] - 2026-06-27
 
 ### 🐛 Bug 修复
